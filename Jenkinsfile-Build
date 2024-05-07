@@ -1,0 +1,129 @@
+#!groovy
+
+getEnvHosts = { ->
+    node {
+        script {
+            def props = readProperties file: '/var/lib/jenkins/env/crud-env'
+            //git env
+            env.GIT_URL = props['GIT_URL']
+            env.GIT_DEFAULT_BRANCH = props['GIT_DEFAULT_BRANCH']
+
+            //docker registry
+            env.DOCKER_REGISTRY_URL = props['DOCKER_REGISTRY_URL']
+            env.DOCKER_REGISTRY_NAMESPACE = props['DOCKER_REGISTRY_NAMESPACE']
+            env.DOCKER_IMAGE_NAME = props['DOCKER_IMAGE_NAME']
+
+            //#i3gis scanner api and project_id
+            env.I3GIS_SCANNER_API = props['I3GIS_SCANNER_API']
+            env.I3GIS_PROJECT_ID = props['I3GIS_PROJECT_ID']
+
+            if (props['BUILD_ENVIRONMENT'] == null) {
+                env.BUILD_ENVIRONMENT = 'dev'
+            } else {
+                env.BUILD_ENVIRONMENT = props['BUILD_ENVIRONMENT']
+            }
+        }
+    }
+
+}
+getEnvHosts()
+pipeline {
+
+    agent any
+
+    tools {
+        maven 'Maven 3.8.3'
+        jdk 'JDK11'
+    }
+    environment {
+        CREDENTIAL_GIT = credentials("d4f42a87-0d1c-4907-b2ec-9dfedb9eca7b")
+    }
+    stages {
+        stage("Checkout ") {
+            steps {
+                checkout([$class: 'GitSCM', branches: [[name: "*/${env.GIT_DEFAULT_BRANCH}"]], extensions: [], userRemoteConfigs: [[url: "${env.GIT_URL}", credentialsId: "d4f42a87-0d1c-4907-b2ec-9dfedb9eca7b"]]])
+            }
+        }
+        
+
+        /* CHANGE THIS STAGE TO YOUR NEEDS UNIT TESTING */
+        stage('Unit test') {
+            steps {
+                script {
+                    try {
+                        sh 'mvn clean package spring-boot:repackage'
+                    } catch (Exception e) {
+                        currentBuild.result = 'FAILURE'
+                        // send notif to telegram
+                        sh "curl -s -X POST 'https://api.telegram.org/bot5637672748:AAG3Lc4Hq7WM2F9TIG9Xa1L-b6RKt_5Tv14/sendMessage?chat_id=-1001895608334&text=Job ${env.JOB_NAME} build ${env.BUILD_NUMBER} has Failed Unit testing. More info at: ${env.BUILD_URL}'"
+                        throw e
+                    }
+                }
+            }
+            post {
+                always {
+                    junit allowEmptyResults: true, testResults: 'target/surefire-reports/*.xml'
+                }
+            }
+        }
+        /* CHANGE THIS STAGE TO YOUR NEEDS UNIT TESTING */
+
+        /* START Stage from i3gis Integration Module */
+        // stage('I3GIS_SCAN') {
+        //     steps {
+        //         script {
+        //             echo "Scanning project general-service with i3gis..."
+        //             final String url = """--location -g --request POST '${env.I3GIS_SCANNER_API}' --header 'Content-Type: application/json' --header 'Authorization: Bearer eyJraWQiOiJwcml2YXRlX2tleSIsInR5cCI6IkpXVCIsImFsZyI6IlJTMjU2In0.eyJ1c2VyX3Blcm1pc3Npb25zIjpbIjMwNyIsIjMwMyIsIjMxMCIsIjMwNSIsIjQwMSIsIjEwMSIsIjQwMyIsIjIwMiIsIjMwNiIsIjMwOCIsIjMwMiIsIjMwMSIsIjMxMSIsIjEwMiIsIjIwMyIsIjMwNCIsIjMwOSIsIjIwMSIsIjQwMiJdLCJ1c2VyX2lkIjoxLCJ1c2VyX25hbWUiOiJBZG1pbmlzdHJhdG9yIGFkbWluIiwiaXNzIjoiaWQuY28uaTMuZ2VuZXJhbHNlcnZpY2UiLCJ1c2VyX2xvZ2luIjoiYWRtaW4iLCJ1c2VyX3JvbGVzIjpbInN1cGVyYWRtaW4iXSwiaWF0IjoxNjYzMTUxMDgwfQ.h17Zy_e-Y_9MOSsFyfMBsjivC8QMd6OHeMjCnUv8U_ZG8-yvKzmAlvDvpX_xa7-7qtSvlwqLsiW8WM9VV2ZpXDNvr787C5Svgs7XU6SvvFme0rvP9Hw4FhiOF7ecoLw73vFerVfkKjlUkcwXwvO1cZlR2uj5aVxYWNAfDbXh6iMrYSpodW9JC-M40a9KNfO3ymB3Ly1dxdXEC1ljXD5RdgbIbqIhXtHRCN1sAY_crsVGX8CAUJq2YE1z8maMxVCOyGikwvnsD-96frSPuwc-Ye0_QXCgRjHbWqpqtgWpl-7GLXYFGa6rLD4aQJPl9w83oEuaeR1WHT_kTXwFIQ6vrw' -d '{"project_id":${env.I3GIS_PROJECT_ID}}'"""
+        //             final def (String response, String code) = sh(script: "set +x; curl -s -w '\n%{response_code}' $url", returnStdout: true).trim().tokenize("\n")
+        //             echo "HTTP response status code: $code"
+        //             if (code == 409) {
+        //                 echo "Project already scanned, skipping..."
+        //             }else if (code != 200) {
+        //                 echo "Response: " + response
+        //                 error("Build failed because scan not success...")
+        //             } else {
+        //                 echo "Scan project general-service with i3gis..."
+        //                 echo "Scan project general-service with i3gis is starting..."
+        //             }
+        //         }
+        //     }
+        // }
+        /* END Stage from i3gis Integration Module */
+
+        stage('BUILD IMAGE') {
+            steps {
+                script {
+                    echo "Build with tag latest"
+                    def VAR_TAG_NAME = "latest" as Object
+                    def replacedUrl = env.DOCKER_REGISTRY_URL.replace("https://", "").replace("http://", "")
+                    def VAR_IMAGE_NAME = "${replacedUrl}/${env.DOCKER_REGISTRY_NAMESPACE}/${env.DOCKER_IMAGE_NAME}:${VAR_TAG_NAME}" as Object
+                    docker.withRegistry(env.DOCKER_REGISTRY_URL, "JENKINS_DOCKER_CREDENTIAL_ID") {
+                        echo "Building image ${VAR_IMAGE_NAME}"
+                        dbImage1 = docker.build(VAR_IMAGE_NAME, '.')
+                    }
+                }
+            }
+        }
+
+        stage("INJECT VERSION IN DOCKER COMPOSE") {
+            steps {
+                script {
+                    def READ_ENV_FILE = readProperties file: '/var/lib/jenkins/env/crud-env'
+                    echo "Exporting tag name latest to service.env file"
+                    READ_ENV_FILE.put("IMAGE_TAG", "latest")
+                    writeFile file: '/var/lib/jenkins/env/crud-env', text: READ_ENV_FILE.collect { "${it.key}=${it.value}" }.join("\n")
+                }
+            }
+        }
+
+        stage('DEPLOY APPLICATION') {
+            steps {
+                echo "Deploy application with docker compose"
+                 sh "docker compose -f ~/deployment/docker-compose.yml stop crud"
+                 sh "docker compose -f ~/deployment/docker-compose.yml rm crud"
+                 sh "docker compose -f ~/deployment/docker-compose.yml up -d crud"
+            }
+        }
+    }
+}
+
